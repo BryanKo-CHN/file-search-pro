@@ -2,6 +2,9 @@
 
 本地 Windows 文件管理工具，纯 Python 编写，双击 exe 即可使用，无需安装 Python 环境。
 
+> **仓库**：https://github.com/BryanKo-CHN/file-search-pro （私有）
+> **状态**：v7 源码与文档已发布；exe 请从 Releases 下载（若尚未发布，见 `RELEASE.md`）。
+
 ## 功能
 
 - **功能 1｜目录扫描与分类导出**：扫描指定硬盘/文件夹，按后缀分类，导出可折叠目录树（HTML/CSV/TXT）。
