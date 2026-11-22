@@ -1,9 +1,10 @@
-# 文件搜索工具（标题 + 正文）v7
+# 文件搜索工具（标题 + 正文）v8
 
 本地 Windows 文件管理工具，纯 Python 编写，双击 exe 即可使用，无需安装 Python 环境。
 
 > **仓库**：https://github.com/BryanKo-CHN/file-search-pro （私有）
-> **状态**：v7 源码与文档已发布；exe 请从 Releases 下载（若尚未发布，见 `RELEASE.md`）。
+> **状态**：v8 源码与文档已发布；exe 请从 Releases 下载（若尚未发布，见 `RELEASE.md`）。
+> **v8 更新**：老式 .doc/.wps 正文改用 OLE2 分片表精确提取，中文不再乱码。
 
 ## 功能
 
@@ -37,8 +38,8 @@ pyinstaller FileSearchPro.spec --clean --noconfirm
 
 见本仓库 Releases 页面。若尚未发布，按 `RELEASE.md` 的步骤上传。
 
-- v7 主程序 exe：121,558,469 字节
-- MD5：`51879b780268d828108182d79c17f6ea`
+- v8 主程序 exe：121,714,910 字节
+- MD5：`c4e050bdbf1cb04c5b0c546f57807755`
 
 ## 使用
 

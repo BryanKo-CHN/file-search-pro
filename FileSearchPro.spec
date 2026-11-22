@@ -5,7 +5,7 @@ datas = []
 binaries = []
 hiddenimports = []
 for pkg in ('pypdf', 'pymupdf', 'mammoth', 'pptx', 'openpyxl', 'lxml', 'PIL',
-            'cobble', 'et_xmlfile', 'win32com', 'comtypes'):
+            'cobble', 'et_xmlfile', 'win32com', 'comtypes', 'olefile'):
     try:
         tmp_ret = collect_all(pkg)
         datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]

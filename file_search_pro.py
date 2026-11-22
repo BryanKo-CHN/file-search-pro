@@ -1234,6 +1234,8 @@ XLS_EXTS = {"xlsx"}
 PPT_EXTS = {"pptx"}
 PDF_EXTS = {"pdf"}
 OLD_DOC_EXTS = {"doc", "xls", "ppt", "wps", "et", "dps"}
+# OLE2 文字类格式（Word 97-2003 二进制）：可用分片表精确提取正文
+OLE2_WORD_EXTS = {"doc", "wps"}
 CONTENT_EXTS = TEXT_EXTS | DOC_EXTS | XLS_EXTS | PPT_EXTS | PDF_EXTS | OLD_DOC_EXTS
 MAX_CONTENT_BYTES = 40 * 1024 * 1024   # 单个文件正文上限 40MB，跳过超大文件
 
@@ -1257,6 +1259,120 @@ def _strip_xml(xml_text):
     return re.sub(r"[ \t]+", " ", x)
 
 
+_ole2_word_cache = {}       # path+mtime+size -> (text, err)，进程内缓存
+_ole2_word_cache_lock = threading.Lock()
+_OLE2_CACHE_MAX = 24
+
+
+def _extract_ole2_word(lp):
+    """用 OLE2 分片表（piece table）精确提取 Word 97-2003 .doc 正文。
+
+    基于 legacy-doc-text-extract 技能：读 WordDocument 流的 FIB，定位
+    1Table/0Table 流里的 Clx→Pcdt→PlcPcd，逐片按压缩标志用 cp1252 或
+    utf-16-le 解码，再清理 Word 控制字符。失败时抛异常由调用方回退。
+    """
+    import struct
+    import olefile
+
+    ole = olefile.OleFileIO(lp)
+    try:
+        wd = ole.openstream("WordDocument").read()
+        flags = struct.unpack_from("<H", wd, 0x0A)[0]
+        tbl_name = "1Table" if (flags >> 9) & 1 else "0Table"
+        csw = struct.unpack_from("<H", wd, 32)[0]
+        off = 34 + csw * 2
+        cslw = struct.unpack_from("<H", wd, off)[0]
+        off += 2 + cslw * 4
+        cbRgFcLcb = struct.unpack_from("<H", wd, off)[0]
+        rgFcLcb_off = off + 2
+        if cbRgFcLcb < 34:
+            raise ValueError("FIB 太短，非标准 .doc")
+        fcClx, lcbClx = struct.unpack_from("<II", wd, rgFcLcb_off + 33 * 8)
+        tbl = ole.openstream(tbl_name).read()
+        clx = tbl[fcClx:fcClx + lcbClx]
+        i, pcdt = 0, None
+        while i < len(clx):
+            t = clx[i]
+            if t == 1:
+                cb = struct.unpack_from("<h", clx, i + 1)[0]
+                i += 3 + cb
+            elif t == 2:
+                lcb = struct.unpack_from("<I", clx, i + 1)[0]
+                pcdt = clx[i + 5:i + 5 + lcb]
+                break
+            else:
+                break
+        if pcdt is None or len(pcdt) < 4:
+            raise ValueError("未找到 Pcdt")
+        n = (len(pcdt) - 4) // 12
+        cps = struct.unpack_from("<%dI" % (n + 1), pcdt, 0)
+        out, pcd_base = [], (n + 1) * 4
+        for k in range(n):
+            pcd = pcdt[pcd_base + k * 8: pcd_base + k * 8 + 8]
+            fc = struct.unpack_from("<I", pcd, 2)[0]
+            compressed = bool(fc & 0x40000000)
+            fc &= 0x3FFFFFFF
+            nchars = cps[k + 1] - cps[k]
+            if compressed:
+                raw = wd[fc // 2: fc // 2 + nchars]
+                s = raw.decode("cp1252", errors="replace")
+            else:
+                raw = wd[fc: fc + nchars * 2]
+                s = raw.decode("utf-16-le", errors="replace")
+            out.append(s)
+        text = "".join(out)
+    finally:
+        try:
+            ole.close()
+        except Exception:
+            pass
+
+    # 清理 Word 控制字符，保留段落/制表边界
+    reps = {"\r": "\n", "\x07": "\t", "\x0b": "\n", "\x0c": "\n",
+            "\x1e": "-", "\x1f": "", "\x13": "", "\x14": "", "\x15": "",
+            "\x01": "", "\x02": "", "\x05": "", "\x08": "", "\u3000": " "}
+    for a, b in reps.items():
+        text = text.replace(a, b)
+    text = "".join(ch for ch in text if ch >= " " or ch in "\n\t")
+    lines = [ln.rstrip() for ln in text.split("\n")]
+    res, blank = [], 0
+    for ln in lines:
+        if ln.strip() == "":
+            blank += 1
+            if blank > 2:
+                continue
+        else:
+            blank = 0
+        res.append(ln)
+    return "\n".join(res)
+
+
+def _extract_ole2_word_cached(lp):
+    """带缓存的 .doc 正文提取（文件未变则复用结果）。"""
+    try:
+        st = os.stat(lp)
+        key = (lp, st.st_mtime, st.st_size)
+    except Exception:
+        key = (lp,)
+    with _ole2_word_cache_lock:
+        hit = _ole2_word_cache.get(key)
+    if hit is not None:
+        return hit
+    try:
+        text = _extract_ole2_word(lp)
+        result = (text, None if text.strip() else "正文为空")
+    except Exception as e:
+        result = ("", "OLE2 解析失败：" + str(e))
+    with _ole2_word_cache_lock:
+        if len(_ole2_word_cache) >= _OLE2_CACHE_MAX:
+            try:
+                _ole2_word_cache.pop(next(iter(_ole2_word_cache)))
+            except Exception:
+                pass
+        _ole2_word_cache[key] = result
+    return result
+
+
 def extract_text(path, ext, needle=None, stop_text=None):
     """尽力提取一个文件的正文文本，失败返回 (文本, 错误信息)。只读打开。
     needle 为关键词字节集合时，先做原始字节预筛，明显不含关键词的文件直接跳过。
@@ -1270,7 +1386,7 @@ def extract_text(path, ext, needle=None, stop_text=None):
     except Exception as e:
         return "", "无法读取：" + str(e)
     # 原始字节预筛：对未压缩文本(txt/doc)很有效，docx/xlsx/pdf 因压缩可能误判，跳过预筛
-    if needle and ext in (TEXT_EXTS | OLD_DOC_EXTS):
+    if needle and ext in ((TEXT_EXTS | OLD_DOC_EXTS) - OLE2_WORD_EXTS):
         try:
             with open(lp, "rb") as fh:
                 raw = fh.read(MAX_CONTENT_BYTES)
@@ -1359,8 +1475,19 @@ def extract_text(path, ext, needle=None, stop_text=None):
                 return "\n".join(chunks), None
             except Exception:
                 return "", "未安装PDF解析库"
+        if ext in OLE2_WORD_EXTS:
+            # Word 97-2003 二进制 .doc / .wps：用 OLE2 分片表精确提取，
+            # 失败再回退到旧的字节捞取法（兼容非标准/OLE 损坏文件）
+            text, err = _extract_ole2_word_cached(lp)
+            if text.strip():
+                return text, err
+            with open(lp, "rb") as fh:
+                raw = fh.read(MAX_CONTENT_BYTES)
+            fallback = _decode_bytes(raw)
+            chunks = re.findall(r"[\u4e00-\u9fffA-Za-z0-9，。、；：？！\s]{4,}", fallback)
+            return "\n".join(chunks), (err or "分片表提取失败，已回退为字节捞取，可能不完整")
         if ext in OLD_DOC_EXTS:
-            # 老式二进制 Office：尽力从字节流里捞可读文本（GB18030/UTF-16LE）
+            # 其他老式二进制 Office（xls/ppt/et/dps）：尽力从字节流里捞可读文本
             with open(lp, "rb") as fh:
                 raw = fh.read(MAX_CONTENT_BYTES)
             text = _decode_bytes(raw)
@@ -2199,7 +2326,11 @@ def preview_info(path, page=1, query=""):
         truncated = len(text) > MAX_PREVIEW_TEXT
         if truncated:
             text = text[:MAX_PREVIEW_TEXT]
-        if office_err:
+        if ext in OLE2_WORD_EXTS and not err:
+            note = "Word 97-2003 正文已精确提取（分片表解析）；排版/图片不保留"
+            if office_err:
+                note = office_err + "；" + note
+        elif office_err:
             note = office_err + "；已降级为文字预览"
         else:
             note = err or ("未检测到可用 Office/WPS，老式格式仅支持文字预览"
